@@ -1,3 +1,4 @@
+#include "freertos/idf_additions.h"
 #include <sys/_stdint.h>
 #include <Arduino.h>
 #include <math.h>
@@ -11,9 +12,6 @@ static volatile uint32_t g_rb_tail = 0;
 
 // DMA frame buffer (internal)
 static uint16_t* g_frame_words = nullptr;
-
-// Trig LUT definition
-int16_t sinTable[360];
 
 // -------- Barriers and RB helpers (internal) --------
 static inline void rb_barrier() { __asm__ __volatile__("" ::: "memory"); }
@@ -113,21 +111,8 @@ void moveToBlank(uint16_t x, uint16_t y) {
   addPoint(x, y, 0);
 }
 
-// ---------- Trig LUT ----------
-static void initTrigLUT() {
-  int max = (1 << 11);
-  for (int i = 0; i < 360; ++i) {
-    float s = sinf(i * (PI / 180.0f));
-    int32_t v = (int32_t)lrintf(s * (float)max);
-    if (v >  max) v =  max;
-    if (v < -max) v = -max;
-    sinTable[i] = (int16_t)v;
-  }
-}
-
 // ---------- Setup ----------
 void Drawing_Setup(int mosi, int clk, int csxy, int z1, int z2, int ldac, int clock_hz, int queue_depth) {
-  initTrigLUT();
 
   g_frame_words = (uint16_t*)heap_caps_malloc(3 * MAX_POINTS * sizeof(uint16_t), MALLOC_CAP_DMA);
   if (!g_frame_words) {
@@ -136,5 +121,5 @@ void Drawing_Setup(int mosi, int clk, int csxy, int z1, int z2, int ldac, int cl
   }
 
   MCP4922_DMA_init_dual(mosi, clk, csxy, z1, z2, ldac, clock_hz, queue_depth);
-  xTaskCreate(DACTask, "DAC Task", DAC_TASK_STACK, NULL, DAC_TASK_PRIO, NULL);
+  xTaskCreatePinnedToCore(DACTask, "DAC Task", DAC_TASK_STACK, NULL, DAC_TASK_PRIO, NULL, 0);
 }

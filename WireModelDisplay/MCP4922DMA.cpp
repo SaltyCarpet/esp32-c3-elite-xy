@@ -4,6 +4,7 @@
 #include <sys/_stdint.h>
 #include "HardwareSerial.h"
 #include "MCP4922DMA.h"
+#include "ErrorHandler.h"
 
 #include <string.h>
 #include <Arduino.h>
@@ -14,7 +15,9 @@
 #include <soc/gpio_struct.h>
 
 #ifndef ESP_ERROR_CHECK
-#define ESP_ERROR_CHECK(x) do { esp_err_t __err = (x); if (__err != ESP_OK) { Serial.printf("ESP_ERROR at %s:%d code=%d\n", __FILE__, __LINE__, (int)__err); abort(); } } while(0)
+#define ESP_ERROR_CHECK(x) do { esp_err_t __err = (x); if (__err != ESP_OK) { 
+  Serial.printf("ESP_ERROR at %s:%d code=%d\n", __FILE__, __LINE__, (int)__err); setStatus(STATUS_ERROR); abort(); 
+  } } while(0)
 #endif
 
 // ---------- Config ----------

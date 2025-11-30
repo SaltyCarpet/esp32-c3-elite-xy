@@ -23,11 +23,6 @@ typedef struct {
   uint16_t brightness;
 } VectorPoint;
 
-// -------- Trig Funcs --------
-extern int16_t sinTable[360];
-#define SIN_DEG(deg) (sinTable[((deg) % 360 + 360) % 360])
-#define COS_DEG(deg) (sinTable[(((deg) + 90) % 360 + 360) % 360])
-
 void flushRing();
 void addPoint(uint16_t x, uint16_t y, uint16_t brightness);
 void drawLineBresenham(int x0, int y0, int x1, int y1, uint16_t brightness);

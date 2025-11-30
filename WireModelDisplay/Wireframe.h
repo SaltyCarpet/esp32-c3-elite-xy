@@ -4,10 +4,8 @@
 #include <vector>
 #include <string>
 #include "Drawing.h"  
+#include "MathHelpers.h"
 
-struct Quaternion { float w = 1, x = 0, y = 0, z = 0; };
-struct Vec3 { float x = 0, y = 0, z = 0; };
-struct Vec2 { int x = 0, y = 0; };
 
 // A face is defined by 3 or 4 vertex indices
 struct Face {
@@ -49,7 +47,7 @@ struct MaxMove {
     Vec3 maxangacc{5,5,5};          //max angular acc
     Vec3 maxtransacc{50,50,50};     //max trans acc
     Vec3 maxangvel{50,50,50};       //max angular vel
-    Vec3 maxtransvel{500,500,500};  //max trans vel
+    Vec3 maxtransvel{2000,2000,2000};  //max trans vel
     Vec3 maxangstep{10,10,10};      //max angular step
     Vec3 maxtransstep{10,10,10};    //max trans step
     Vec3 maxangdamp{5,5,5};         //max angular damp
@@ -61,11 +59,12 @@ struct MaxMove {
 void wireframeInit(int centerX, int centerY, int scale);
 bool loadWRL(const char* path, WireframeModel& model);
 void listLittleFS();
-void applyMouseInput(MoveBuf& mov, float dx, float dy, float sensitivity);
-void applyMouseInputDirect(MoveBuf& mov, float dx, float dy, float sensitivity);
+void applyRotInput(MoveBuf& mov, float dax, float day, float daz, float sensitivity);
+void applyRotInputAxis(MoveBuf& mov, Vec3 input, const Vec3& worldAxis, const Vec3& shipRot, const float sensitivity);
+void applyRotInputDirect(MoveBuf& mov, Vec3 input, Vec3 screenUp, float sensitivity);
 void centerAndScale(WireframeModel& model, float targetSize);
 void moveBufUpdater(MoveBuf& mov, const KeyDir& key, const MaxMove& lim, float dt);
-void clearMovBuf(MoveBuf& mov);
+void clearMovBufs(MoveBuf& mov, KeyDir& kd);
 void transformModel(ModelBuf* buf, const MoveBuf& mov);
 void wireframeDrawCulled(const ModelBuf* buf, uint16_t brightness);
 void wireframeDrawAll(const ModelBuf* buf, uint16_t b);

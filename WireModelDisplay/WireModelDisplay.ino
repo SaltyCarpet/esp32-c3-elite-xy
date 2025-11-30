@@ -1,75 +1,107 @@
 #include <Arduino.h>
 //#include <time.h>
-#include <math.h>
-#include <esp_heap_caps.h>
-#include "FS.h"
-#include "LittleFS.h"
-//#include "wifi_setup.h"
-#include "Drawing.h"
 #include <Preferences.h>
+#include <LittleFS.h>
+#include "ErrorHandler.h"
+#include "Drawing.h"
 #include "esp_system.h"
 #include "Wireframe.h"
 #include "Models.h"
-//#include "WebSocket.h"
 
 // -------- Pins --------
-#define LED_BUILTIN 8
+#define LED_PIN 38
 
-#define PIN_MOSI 4
-#define PIN_CLK 5
-#define PIN_CS_XY 7
-#define PIN_LDAC 2
-#define PIN_Z_1 20
-#define PIN_Z_2 21
+#define PIN_MOSI 11
+#define PIN_CLK 12
+#define PIN_CS_XY 10
+#define PIN_LDAC 13
+#define PIN_Z_1 18
+#define PIN_Z_2 8
 
 // --- Protocol constants ---
 #define HEADER 0xAA
-#define CMD_MOVE 0x01
-#define CMD_KEY  0x02
+#define KEY_OFFSET 150
+#define CMD_LEN  7
 
 Preferences prefs;
 uint64_t c_millis = 0;
-ModelBuf modelbuffer;
+WireframeModel SHIPModel;
+WireframeModel ROCKModel;
+ModelBuf shipbuffer;
+ModelBuf rockbuffer;
 ModelBuf coordbuffer;
-WireframeModel WRLModel;
-MoveBuf mover;
-KeyDir kd;
+MoveBuf shipmover;
+MoveBuf rockmover[50];
 MaxMove maxmov;
-float frameTime = 16;
+MaxMove rocklim;
+KeyDir kd;
+Vec3 kdDir;
+float frameTime = 10;
 
-/*
-struct Command {
-  const char* name;
-  float* target;
+// Map from int key to handler
+std::unordered_map<int, std::function<void(float)>> keyMap = {
+  { 'w', [](float v){ kd.trans.z = v; } },
+  { 's', [](float v){ kd.trans.z = -v; } },
+  { 'a', [](float v){ kd.angle.z = v; } },
+  { 'd', [](float v){ kd.angle.z = -v; } },
+  { 'q', [](float v){ kd.angle.y = -v; } },
+  { 'e', [](float v){ kd.angle.y = v; } },
+  { 'i', [](float v){ kd.angle.x = v; } },
+  { 'k', [](float v){ kd.angle.x = -v; } },
+  { 'j', [](float v){ kd.trans.y = -v; } },
+  { 'l', [](float v){ kd.trans.y = v; } },
+  { 'r', [](float v){ if (v > 0.5f) clearMovBufs(shipmover, kd); } },
+
+  { 0, [](float v){ if (v > 0.5f) clearMovBufs(shipmover, kd); } },
+  { KEY_OFFSET, [](float v){ kdDir.x = v;} },
+  { KEY_OFFSET + 1, [](float v){ kdDir.y = -v;} },
+  { KEY_OFFSET + 4, [](float v){ kd.trans.z = -(1+v)/2; } },
+  { KEY_OFFSET + 5, [](float v){ kd.trans.z = (1+v)/2; } },
 };
 
-Command commands[] = {
-  {"tx", &tx},  {"ty", &ty},  {"tz", &tz},
-  {"ax", &ax},  {"ay", &ay},  {"az", &az},
-  {"dtx", &dtx},{"dty", &dty},{"dtz", &dtz},
-  {"dax", &dax},{"day", &day},{"daz", &daz},
-  {"mv", &move}
-};
 
-void moveWithConsole(String in) {
-  String cmd = in.substring(0,3);
-  cmd.trim();
-  int val = in.substring(3).toInt();
+void serialInterface()
+{
+  // Process serial packets
+  static uint8_t buf[CMD_LEN];
+  static int idx = 0;
 
-  bool found = false;
-  for (auto &c : commands) {
-    if (cmd.equals(c.name)) {
-      *(c.target) = val;
-      found = true;
-      break;
+  while (Serial.available()) {
+    uint8_t b = Serial.read();
+    buf[idx++] = b;
+    //if (idx >= 8) {idx = 0;}
+    
+    if (idx >= CMD_LEN) {
+      idx = 0;
+      //Serial.printf("Packet cmd=%d dx=%d dy=%d checksumOK\n", cmd, dx, dy);
+
+      if (buf[0] != HEADER) continue;
+
+      uint8_t checksum = 0;
+      for (int i=0; i<CMD_LEN-1; i++) checksum ^= buf[i];
+      if (checksum != buf[CMD_LEN-1]) {
+        Serial.println("Bad checksum");
+        continue;
+      }
+
+      uint8_t key = buf[1];
+      float val = 0;
+      memcpy(&val, &buf[2], sizeof(float)); // little-endian float
+      val = ((val>0.01f)|(val<-0.01f))?val:0.0f;
+
+      //Serial.printf("Got key %d value=%f\n", key, val);
+
+      // Lookup in dictionary
+      auto it = keyMap.find((char)key);
+      if (it != keyMap.end()) {
+        it->second(val);  // call the mapped handler
+      }
+      else{
+        Serial.print("Unknown Key");
+      }
     }
   }
-  if (!found) Serial.println("Unknown");
-
-  Serial.printf("tx=%f,ty=%f,tz=%f,\nax=%f,ay=%f,az=%f,\n", tx,ty,tz,ax,ay,az);
-  Serial.printf("dtx=%f,dty=%f,dtz=%f,\ndax=%f,day=%f,daz=%f,\n", dtx,dty,dtz,dax,day,daz);
 }
-*/
 
 // ---------- Arduino setup/loop ----------
 void reboot_after_flash()
@@ -92,9 +124,8 @@ void setup() {
   Serial.begin(115200);
   delay(100);
   //reboot_after_flash();
-  pinMode(LED_BUILTIN, OUTPUT);
-  digitalWrite(LED_BUILTIN, LOW);
-
+  errorHandlerSetup(LED_PIN);
+  setStatus(STATUS_BUSY);
   Serial.println("Ready");
   Serial.printf("Free heap: %lu bytes\n", ESP.getFreeHeap());
 
@@ -110,72 +141,26 @@ void setup() {
   //listLittleFS();
   wireframeInit(1<<11, 1<<11, 1<<12);
   const char* wrlname = "/vrml/adder.wrl";
-  bool rtn = loadWRL(wrlname,WRLModel);
-  Serial.println(WRLModel.vertCount);
-  Serial.println(WRLModel.faceIndexCount);
-  Serial.println(rtn);
-  centerAndScale(WRLModel, 5.0f);
-  modelbuffer.model = &WRLModel;
+  bool rtn = loadWRL(wrlname,SHIPModel);
+  //Serial.println(WRLModel.vertCount);
+  //Serial.println(WRLModel.faceIndexCount);
+  //Serial.println(rtn);
+  centerAndScale(SHIPModel, 1.0f);
+  shipbuffer.model = &SHIPModel;
+  wrlname = "/vrml/boulder.wrl";
+  rtn = loadWRL(wrlname,ROCKModel);
+  centerAndScale(ROCKModel, 5.0f);
+  rockbuffer.model = &ROCKModel;
   coordbuffer.model = &coordModel;
-  mover.pos = {0,0,3};
-  digitalWrite(LED_BUILTIN, HIGH);
+  shipmover.pos = {0,0,10};
+  shipmover.orientation = {1,-1,0,0};
+  setStatus(STATUS_OK);
   Serial.println("Setup finished");
 }
 
 void loop() {
 
-  // Process serial packets
-  static uint8_t buf[8];
-  static int idx = 0;
-
-  while (Serial.available()) {
-    uint8_t b = Serial.read();
-    buf[idx++] = b;
-    //if (idx >= 8) {idx = 0;}
-    
-    if (idx >= 8) {
-      idx = 0;
-      //Serial.printf("Packet cmd=%d dx=%d dy=%d checksumOK\n", cmd, dx, dy);
-
-      if (buf[0] != HEADER) continue;
-
-      uint8_t checksum = 0;
-      for (int i=0; i<7; i++) checksum ^= buf[i];
-      if (checksum != buf[7]) {
-        Serial.println("Bad checksum");
-        continue;
-      }
-      //if (checksum != buf[7]) continue;
-
-      uint8_t cmd = buf[1];
-      int16_t dx = buf[2] | (buf[3]<<8);
-      int16_t dy = buf[4] | (buf[5]<<8);
-
-      if (cmd == CMD_MOVE) {
-        // Mouse move
-        applyMouseInputDirect(mover, dx, dy, 0.005f);
-      }
-      else if (cmd == CMD_KEY) {
-        char c = (char)dx;
-        bool pressed = (dy != 0);
-        //Serial.printf("Got key %c pressed=%d\n", c, pressed);
-        switch (c) {
-          case 'w': kd.trans.z = pressed; break;
-          case 's': kd.trans.z = -pressed; break;
-          case 'a': kd.angle.z = pressed; break;
-          case 'd': kd.angle.z = -pressed; break;
-          case 'q': kd.angle.y = -pressed; break;
-          case 'e': kd.angle.y = pressed; break;
-          case 'i': kd.angle.x = pressed; break;
-          case 'k': kd.angle.x = -pressed; break;
-          case 'j': kd.trans.y = -pressed; break;
-          case 'l': kd.trans.y = pressed; break;
-          case 'r': if (pressed) { clearMovBuf(mover); } break;
-        }
-      }
-    }
-    
-  }
+  serialInterface();
   //Serial.printf("cmd=%d dx=%d dy=%d kd: ax=%d ay=%d az=%d tx=%d ty=%d tz=%d\n",
   //            cmd, dx, dy, kd.max, kd.may, kd.maz, kd.mtx, kd.mty, kd.mtz);
 
@@ -188,13 +173,13 @@ void loop() {
     c_millis = now;
 
     // Apply continuous actions
-    moveBufUpdater(mover, kd, maxmov, dt);
+    moveBufUpdater(shipmover, kd, maxmov, dt);
+    applyRotInputAxis(shipmover, kdDir, {0,0,-1}, {0,1,0}, dt*10);
 
-    transformModel(&modelbuffer, mover);
-
-    transformModel(&coordbuffer, mover);
+    transformModel(&shipbuffer, shipmover);
+    //transformModel(&coordbuffer, shipmover);
+    // All logic runs in tasks
+    wireframeDrawCulled(&shipbuffer, 3);
+    //wireframeDrawAll(&coordbuffer, 3);
   }
-  // All logic runs in tasks
-  wireframeDrawCulled(&modelbuffer, 3);
-  wireframeDrawAll(&coordbuffer, 3);
 }

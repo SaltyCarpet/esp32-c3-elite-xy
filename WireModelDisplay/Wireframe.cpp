@@ -9,6 +9,7 @@
 #include "LittleFS.h"
 #include "Drawing.h"
 #include "Wireframe.h"
+#include "MathHelpers.h"
 
 
 static int g_cX = (1<<11);
@@ -100,90 +101,13 @@ void listLittleFS() {
     }
 }
 
-// -----------------------------
-// Math helpers
-// -----------------------------
-static inline Vec3 cross(const Vec3& u, const Vec3& v) {
-    return { u.y*v.z - u.z*v.y,
-             u.z*v.x - u.x*v.z,
-             u.x*v.y - u.y*v.x };
-}
-static inline float dot(const Vec3& u, const Vec3& v) {
-    return u.x*v.x + u.y*v.y + u.z*v.z;
-}
-
-inline Quaternion quatIdentity() {
-    return {1.0f, 0.0f, 0.0f, 0.0f};
-}
-
-inline Quaternion quatNormalize(const Quaternion& q) {
-    float mag = sqrtf(q.w*q.w + q.x*q.x + q.y*q.y + q.z*q.z);
-    if (mag < 1e-8f) return quatIdentity();
-    return { q.w/mag, q.x/mag, q.y/mag, q.z/mag };
-}
-
-inline Quaternion quatMultiply(const Quaternion& a, const Quaternion& b) {
-    return {
-        a.w*b.w - a.x*b.x - a.y*b.y - a.z*b.z,
-        a.w*b.x + a.x*b.w + a.y*b.z - a.z*b.y,
-        a.w*b.y - a.x*b.z + a.y*b.w + a.z*b.x,
-        a.w*b.z + a.x*b.y - a.y*b.x + a.z*b.w
-    };
-}
-
-inline Quaternion quatConjugate(const Quaternion& q) {
-    return { q.w, -q.x, -q.y, -q.z };
-}
-
-inline Quaternion quatFromAxisAngle(float ax, float ay, float az, float angle) {
-    float half = 0.5f * angle;
-    float s = sinf(half);
-    return quatNormalize({ cosf(half), ax*s, ay*s, az*s });
-}
-
-inline void quatToMatrix(const Quaternion& q, float M[3][3]) {
-    float xx = q.x*q.x, yy = q.y*q.y, zz = q.z*q.z;
-    float xy = q.x*q.y, xz = q.x*q.z, yz = q.y*q.z;
-    float wx = q.w*q.x, wy = q.w*q.y, wz = q.w*q.z;
-
-    M[0][0] = 1 - 2*(yy + zz);
-    M[0][1] = 2*(xy - wz);
-    M[0][2] = 2*(xz + wy);
-
-    M[1][0] = 2*(xy + wz);
-    M[1][1] = 1 - 2*(xx + zz);
-    M[1][2] = 2*(yz - wx);
-
-    M[2][0] = 2*(xz - wy);
-    M[2][1] = 2*(yz + wx);
-    M[2][2] = 1 - 2*(xx + yy);
-}
-
-inline Vec3 rotateVector(const Quaternion& q, const Vec3& v) {
-    // v' = q * (0,v) * q^-1
-    Quaternion vq = {0, v.x, v.y, v.z};
-    Quaternion qConj = quatConjugate(q);
-    Quaternion rq = quatMultiply(quatMultiply(q, vq), qConj);
-    return { rq.x, rq.y, rq.z };
-}
-
-inline void integrateOrientation(Quaternion& q, const Vec3& angVel, float dt) {
-    float mag = sqrtf(angVel.x*angVel.x + angVel.y*angVel.y + angVel.z*angVel.z);
-    if (mag > 1e-6f) {
-        float half = 0.5f * mag * dt;
-        float s = sinf(half) / mag;
-        Quaternion dq = { cosf(half), angVel.x*s, angVel.y*s, angVel.z*s };
-        q = quatNormalize(quatMultiply(q, dq));
-    }
-}
-
 
 void moveBufUpdater(MoveBuf& mov, const KeyDir& key, const MaxMove& lim, float dt)
 {
     if (dt <= 0) return;
 
     // --- helper for one axis ---
-    auto updateAxis = [&](float& acc, float& vel, int keyDir,
+    auto updateAxis = [&](float& acc, float& vel, float keyDir,
                           float maxAcc, float step, float damp, float maxVel)
     {
         float targetAcc = keyDir * maxAcc;
@@ -192,26 +116,26 @@ void moveBufUpdater(MoveBuf& mov, const KeyDir& key, const MaxMove& lim, float d
         // integrate velocity
         vel += acc * dt;
         // damping
-        vel *= (1.0f - damp * dt);
+        vel *= ((1.0f - damp * dt)>0)?(1.0f - damp * dt):0.0f;
         // clamp velocity
         if (vel >  maxVel) vel =  maxVel;
         if (vel < -maxVel) vel = -maxVel;
     };
 
     // --- angular axes ---
-    updateAxis(mov.angAcc.x, mov.angVel.x, (int)key.angle.x,
+    updateAxis(mov.angAcc.x, mov.angVel.x, key.angle.x,
                lim.maxangacc.x, lim.maxangstep.x, lim.maxangdamp.x, lim.maxangvel.x);
-    updateAxis(mov.angAcc.y, mov.angVel.y, (int)key.angle.y,
+    updateAxis(mov.angAcc.y, mov.angVel.y, key.angle.y,
                lim.maxangacc.y, lim.maxangstep.y, lim.maxangdamp.y, lim.maxangvel.y);
-    updateAxis(mov.angAcc.z, mov.angVel.z, (int)key.angle.z,
+    updateAxis(mov.angAcc.z, mov.angVel.z, key.angle.z,
                lim.maxangacc.z, lim.maxangstep.z, lim.maxangdamp.z, lim.maxangvel.z);
 
     // --- translational axes ---
-    updateAxis(mov.linAcc.x, mov.linVel.x, (int)key.trans.x,
+    updateAxis(mov.linAcc.x, mov.linVel.x, key.trans.x,
                lim.maxtransacc.x, lim.maxtransstep.x, lim.maxtransdamp.x, lim.maxtransvel.x);
-    updateAxis(mov.linAcc.y, mov.linVel.y, (int)key.trans.y,
+    updateAxis(mov.linAcc.y, mov.linVel.y, key.trans.y,
                lim.maxtransacc.y, lim.maxtransstep.y, lim.maxtransdamp.y, lim.maxtransvel.y);
-    updateAxis(mov.linAcc.z, mov.linVel.z, (int)key.trans.z,
+    updateAxis(mov.linAcc.z, mov.linVel.z, key.trans.z,
                lim.maxtransacc.z, lim.maxtransstep.z, lim.maxtransdamp.z, lim.maxtransvel.z);
 
     // --- integrate orientation from angular velocity ---
@@ -226,43 +150,136 @@ void moveBufUpdater(MoveBuf& mov, const KeyDir& key, const MaxMove& lim, float d
 }
 
 
-void clearMovBuf(MoveBuf& mov)
+void clearMovBufs(MoveBuf& mov, KeyDir& kd)
 {
-    mov.orientation = {1,0,0,0};
-    mov.pos = {0,0,3};
+    mov.orientation = {1,-1,0,0};
+    mov.pos = {0,0,10};
     mov.angVel = {0,0,0};
     mov.linVel = {0,0,0};
     mov.angAcc = {0,0,0};
     mov.linAcc = {0,0,0};
+    kd.angle = {0,0,0};
+    kd.trans = {0,0,0};
 }
 
-void applyMouseInput(MoveBuf& mov, float dx, float dy, float sensitivity)
-{
-    // treat mouse deltas as angular velocity impulses in local space
-    mov.angVel.y += dx * sensitivity; // yaw
-    mov.angVel.x += dy * sensitivity; // pitch
-}
-
-void applyMouseInputDirect(MoveBuf& mov, float dx, float dy, float sensitivity)
+void applyRotInput(MoveBuf& mov, float dax, float day, float daz, float sensitivity)
 {
     // scale deltas to radians
-    float yaw   = dx * sensitivity;
-    float pitch = dy * sensitivity;
+    float yaw   = dax * sensitivity;
+    float pitch = day * sensitivity;
+    float roll  = daz * sensitivity;
 
     // local axes in ship space
-    Vec3 up    = {0,1,0};
-    Vec3 right = {1,0,0};
+    Vec3 up      = {0,1,0};  // yaw axis
+    Vec3 right   = {1,0,0};  // pitch axis
+    Vec3 forward = {0,0,1};  // roll axis
 
     // build incremental quaternions
-    Quaternion qYaw   = quatFromAxisAngle(up.x,    up.y,    up.z,    yaw);
-    Quaternion qPitch = quatFromAxisAngle(right.x, right.y, right.z, pitch);
+    Quaternion qYaw   = quatFromAxisAngle(up.x,      up.y,      up.z,      yaw);
+    Quaternion qPitch = quatFromAxisAngle(right.x,   right.y,   right.z,   pitch);
+    Quaternion qRoll  = quatFromAxisAngle(forward.x, forward.y, forward.z, roll);
 
     // apply them to orientation
     mov.orientation = quatMultiply(mov.orientation, qYaw);
     mov.orientation = quatMultiply(mov.orientation, qPitch);
+    mov.orientation = quatMultiply(mov.orientation, qRoll);
+
+    // normalize to avoid drift
     mov.orientation = quatNormalize(mov.orientation);
 }
 
+// Rotate ship around an arbitrary world axis using joystick input
+void applyRotInputAxis(MoveBuf& mov, Vec3 input, const Vec3& worldAxis, const Vec3& shipRot, const float sensitivity)
+{
+    // Compute desired angle from joystick
+    // Example: use atan2 for 2D joystick input
+    if (input.x == 0 && input.y == 0) return;
+    float angle = atan2f(input.x, input.y); // radians
+
+    // Normalize world axis
+    if (worldAxis.x == 0 && worldAxis.y == 0 && worldAxis.z == 0) return;
+    Vec3 rotAxis = normalize(worldAxis);
+
+    // Build target quaternion from axis + angle
+    Quaternion qTarget = quatFromAxisAngle(rotAxis.x, rotAxis.y, rotAxis.z, angle);
+    qTarget = quatNormalize(qTarget);
+
+    // --- Extract ship axes in world space after base rotation ---
+    Vec3 chosenRot = rotateVector(qTarget, shipRot);
+
+    // --- Alignment correction: chosenRot axis must align with worldRotAxis ---
+    Vec3 corrAxis = cross(chosenRot, rotAxis);
+    float corrMag = sqrtf(corrAxis.x*corrAxis.x + corrAxis.y*corrAxis.y + corrAxis.z*corrAxis.z);
+    if (corrMag > 1e-6f) {
+        corrAxis = {corrAxis.x/corrMag, corrAxis.y/corrMag, corrAxis.z/corrMag};
+        float dotVal = fmaxf(-1.0f, fminf(1.0f, chosenRot.x*rotAxis.x +
+                                          chosenRot.y*rotAxis.y +
+                                          chosenRot.z*rotAxis.z));
+        float corrAngle = acosf(dotVal);
+        Quaternion qCorr = quatFromAxisAngle(corrAxis.x, corrAxis.y, corrAxis.z, corrAngle);
+        qTarget = quatMultiply(qCorr, qTarget);
+    }
+
+    // Interpolate toward target orientation
+    float dp = dot(&mov.orientation.w, &qTarget.w, 4);
+    if (dp < 0.0f) {
+        dp = -dp;
+        qTarget.w = -qTarget.w;
+        qTarget.x = -qTarget.x;
+        qTarget.y = -qTarget.y;
+        qTarget.z = -qTarget.z;
+    }
+    Quaternion result = {
+        mov.orientation.w + sensitivity*(qTarget.w - mov.orientation.w),
+        mov.orientation.x + sensitivity*(qTarget.x - mov.orientation.x),
+        mov.orientation.y + sensitivity*(qTarget.y - mov.orientation.y),
+        mov.orientation.z + sensitivity*(qTarget.z - mov.orientation.z)
+    };
+    mov.orientation = quatNormalize(result);
+    mov.orientation = quatNormalize(mov.orientation);
+}
+
+void applyRotInputDirect(MoveBuf& mov, Vec3 input, Vec3 screenUp, float sensitivity)
+{
+    // Desired forward direction from joystick
+    Vec3 forward = normalize(input);
+    if (forward.x == 0 && forward.y == 0 && forward.z == 0) return;
+
+    // Build orthonormal basis
+    Vec3 right = normalize(cross(screenUp, forward));
+    if (right.x == 0 && right.y == 0 && right.z == 0) {
+        // Degenerate case: forward parallel to up
+        right = {1,0,0};
+    }
+    Vec3 up = cross(forward, right);
+
+    // Rotation matrix
+    float m[3][3] = {
+        { right.x,   right.y,   right.z },
+        { up.x,      up.y,      up.z    },
+        { forward.x, forward.y, forward.z }
+    };
+
+    // Convert to quaternion
+    Quaternion q = quatFromRotationMatrix(m);
+    Quaternion qTarget = quatNormalize(q);
+    // Assign orientation incrementally
+    float dp = dot(&mov.orientation.w, &qTarget.w, 4);
+    if (dp < 0.0f) {
+        dp = -dp;
+        qTarget.w = -qTarget.w;
+        qTarget.x = -qTarget.x;
+        qTarget.y = -qTarget.y;
+        qTarget.z = -qTarget.z;
+    }
+    Quaternion result = {
+        mov.orientation.w + sensitivity*(qTarget.w - mov.orientation.w),
+        mov.orientation.x + sensitivity*(qTarget.x - mov.orientation.x),
+        mov.orientation.y + sensitivity*(qTarget.y - mov.orientation.y),
+        mov.orientation.z + sensitivity*(qTarget.z - mov.orientation.z)
+    };
+    mov.orientation = quatNormalize(result);
+}
 
 void centerAndScale(WireframeModel& model, float targetSize)
 {
