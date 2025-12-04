@@ -4,16 +4,16 @@
 // -------------------------
 // coord (unit wireframe)
 // -------------------------
-static const std::vector<Vec3> coordVerts = {
+static std::vector<Vec3> coordVerts = {
   {0,0,0}, {1,0,0}, {0,1,0}, {0,0,1},  // front (z = -1)
 };
-static const std::vector<int> coordFaces = {
+static std::vector<int> coordFaces = {
   0,1,-1,
   0,2,-1,
   0,3,-1
 };
 
-const WireframeModel coordModel = {
+WireframeModel coordModel = {
   coordVerts,
   coordFaces,
   coordVerts.size(),
@@ -23,11 +23,11 @@ const WireframeModel coordModel = {
 // -------------------------
 // Cube (unit wireframe)
 // -------------------------
-static const std::vector<Vec3> cubeVerts = {
+static std::vector<Vec3> cubeVerts = {
   {-1,-1,-1}, { 1,-1,-1}, { 1, 1,-1}, {-1, 1,-1},  // front (z = -1)
   {-1,-1, 1}, { 1,-1, 1}, { 1, 1, 1}, {-1, 1, 1}   // rear  (z =  1)
 };
-static const std::vector<int> cubeFaces = {
+static std::vector<int> cubeFaces = {
   0,1,2,3,-1, // front
   7,6,5,4,-1, // rear
   4,5,1,0,-1, // bottom
@@ -36,7 +36,7 @@ static const std::vector<int> cubeFaces = {
   5,6,2,1,-1  // right
 };
 
-const WireframeModel cubeModel = {
+WireframeModel cubeModel = {
   cubeVerts,
   cubeFaces,
   cubeVerts.size(),
@@ -54,7 +54,7 @@ const WireframeModel cubeModel = {
 //  - 4 triangles forming the nose cap
 //  - 5 quads: left, right, top, bottom, rear
 
-static const std::vector<Vec3> shipVerts = {
+static std::vector<Vec3> shipVerts = {
   { 0.0f,  0.0f, -2.0f}, // 0 nose
   {-1.0f, -0.5f, -1.0f}, // 1 front LL
   {-1.0f,  0.5f, -1.0f}, // 2 front UL
@@ -65,7 +65,7 @@ static const std::vector<Vec3> shipVerts = {
   { 2.0f,  1.0f,  1.0f}, // 7 rear  UR
   { 2.0f, -1.0f,  1.0f}  // 8 rear  LR
 };
-static const std::vector<int> shipFaces = {
+static std::vector<int> shipFaces = {
   // Nose cap (triangles)
   0,2,1,-1, // left
   0,3,2,-1, // top
@@ -79,7 +79,7 @@ static const std::vector<int> shipFaces = {
   5,6,7,8,-1  // rear
 };
 
-const WireframeModel shipModel = {
+WireframeModel shipModel = {
   shipVerts,
   shipFaces,
   shipVerts.size(),

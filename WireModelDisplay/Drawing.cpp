@@ -87,9 +87,9 @@ void addPoint(uint16_t x, uint16_t y, uint16_t brightness) {
 }
 
 void drawLineBresenham(int x0, int y0, int x1, int y1, uint16_t brightness) {
-    int dx = abs(x1 - x0);
+    int dx = fabs(x1 - x0);
     int sx = (x0 < x1) ? 1 : -1;
-    int dy = abs(y1 - y0);
+    int dy = fabs(y1 - y0);
     int sy = (y0 < y1) ? 1 : -1;
     int err = dx - dy;
     int skip = ((1 + (dx + dy)/5) < MAX_STEP_SIZE) ? (1 + (dx + dy)/5) : MAX_STEP_SIZE;

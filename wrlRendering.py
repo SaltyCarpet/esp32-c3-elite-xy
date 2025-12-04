@@ -112,7 +112,7 @@ def render_model(points, faces):
 if __name__ == "__main__":
     # Change filename to your .wrl file
     curdir = os.path.abspath(__file__)
-    filename = os.path.join(curdir, r"..\WireModelDisplay\data\vrml\trans.wrl")
+    filename = os.path.join(curdir, r"..\WireModelDisplay\data\vrml\@testcube.wrl")
     points, faces = parse_wrl(filename)
 
     print(f"Loaded {len(points)} points and {len(faces)} faces.")

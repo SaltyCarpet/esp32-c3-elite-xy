@@ -1,10 +1,6 @@
 #include <Arduino.h>
 #include <math.h>
 #include <vector>
-//#include <fstream>
-//#include <sstream>
-#include <string>
-//#include <cctype>
 #include "FS.h"
 #include "LittleFS.h"
 #include "Drawing.h"
@@ -20,6 +16,34 @@ void wireframeInit(int centerX, int centerY, int scale) {
     g_cX = centerX;
     g_cY = centerY;
     g_scale   = scale;
+}
+
+void listLittleFS() {
+    File root = LittleFS.open("/vrml");
+    if (!root) {
+        Serial.println("Failed to open root directory");
+        return ;
+    }
+    if (!root.isDirectory()) {
+        Serial.println("Root is not a directory");
+        return;
+    }
+    Serial.println("List Files:");
+    File file = root.openNextFile();
+    while (file) {
+        Serial.print("FILE: ");
+        Serial.print(file.name());
+        Serial.print("  SIZE: ");
+        Serial.println(file.size());
+        file = root.openNextFile();
+    }
+}
+
+bool initModelBuf(const char* path, float targetSize, ModelBuf &buf)
+{
+    WireframeModel* model = new WireframeModel();
+    if (!loadWRL(path, *model)) return false;
+    return centerAndScale(buf, *model, targetSize);
 }
 
 bool loadWRL(const char* path, WireframeModel& model) {
@@ -80,25 +104,52 @@ bool loadWRL(const char* path, WireframeModel& model) {
     return true;
 }
 
-void listLittleFS() {
-    File root = LittleFS.open("/vrml");
-    if (!root) {
-        Serial.println("Failed to open root directory");
-        return;
+bool centerAndScale(ModelBuf& buf, WireframeModel& model, float targetSize)
+{
+    if (model.verts.empty()) return false;
+    
+    // Step 1: bounding box
+    float minX = model.verts[0].x, maxX = model.verts[0].x;
+    float minY = model.verts[0].y, maxY = model.verts[0].y;
+    float minZ = model.verts[0].z, maxZ = model.verts[0].z;
+
+    for (auto& v : model.verts) {
+        if (v.x < minX) {minX = v.x;}
+        if (v.x > maxX) {maxX = v.x;}
+        if (v.y < minY) {minY = v.y;}
+        if (v.y > maxY) {maxY = v.y;}
+        if (v.z < minZ) {minZ = v.z;}
+        if (v.z > maxZ) {maxZ = v.z;}
     }
-    if (!root.isDirectory()) {
-        Serial.println("Root is not a directory");
-        return;
+
+    // Step 2: center
+    Vec3 c = {(minX + maxX) * 0.5f, (minY + maxY) * 0.5f, (minZ + maxZ) * 0.5f};
+
+    // Step 3: subtract center
+    for (auto& v : model.verts) {
+        v -= c;
     }
-    Serial.println("List Files:");
-    File file = root.openNextFile();
-    while (file) {
-        Serial.print("FILE: ");
-        Serial.print(file.name());
-        Serial.print("  SIZE: ");
-        Serial.println(file.size());
-        file = root.openNextFile();
+
+    buf.radius = targetSize * 0.5f;
+    buf.model = &model;
+
+    // Step 4: largest extent
+    float extentX = maxX - minX;
+    float extentY = maxY - minY;
+    float extentZ = maxZ - minZ;
+    float maxExtent = std::max({extentX, extentY, extentZ});
+
+    if (maxExtent < 1e-6f) return false; // avoid div by zero
+
+    // Step 5: scale factor
+    float scale = targetSize / maxExtent;
+
+    // Step 6: apply scale
+    for (auto& v : model.verts) {
+        v *= scale;
     }
+    buf.model = &model;
+    return true;
 }
 
 
@@ -111,12 +162,13 @@ void moveBufUpdater(MoveBuf& mov, const KeyDir& key, const MaxMove& lim, float d
                           float maxAcc, float step, float damp, float maxVel)
     {
         float targetAcc = keyDir * maxAcc;
+        float damping = (1.0f - damp * dt * (1.0f - fabs(keyDir)));
         // ramp acceleration toward target
         acc += (targetAcc - acc) * step * dt;
         // integrate velocity
         vel += acc * dt;
         // damping
-        vel *= ((1.0f - damp * dt)>0)?(1.0f - damp * dt):0.0f;
+        vel *= (damping>0)?damping:0.0f;
         // clamp velocity
         if (vel >  maxVel) vel =  maxVel;
         if (vel < -maxVel) vel = -maxVel;
@@ -144,11 +196,8 @@ void moveBufUpdater(MoveBuf& mov, const KeyDir& key, const MaxMove& lim, float d
     // --- integrate position from linear velocity ---
     // Rotate local velocity into world space using quaternion
     Vec3 worldVel = rotateVector(mov.orientation, mov.linVel);
-    mov.pos.x += worldVel.x * dt;
-    mov.pos.y += worldVel.y * dt;
-    mov.pos.z += worldVel.z * dt;
+    mov.pos += (worldVel * dt);
 }
-
 
 void clearMovBufs(MoveBuf& mov, KeyDir& kd)
 {
@@ -161,6 +210,17 @@ void clearMovBufs(MoveBuf& mov, KeyDir& kd)
     kd.angle = {0,0,0};
     kd.trans = {0,0,0};
 }
+/*
+// -------------------- Collision Check --------------------
+bool collideSphere(const ModelBuf& a, const ModelBuf& b) {
+    float dx = a.pos.x - b.center.x;
+    float dy = a.pos3D.y - b.center.y;
+    float dz = a.center.z - b.center.z;
+    float dist2 = dx*dx + dy*dy + dz*dz;
+    float rsum = a.radius + b.radius;
+    return dist2 <= rsum*rsum;
+}
+*/
 
 void applyRotInput(MoveBuf& mov, float dax, float day, float daz, float sensitivity)
 {
@@ -180,9 +240,9 @@ void applyRotInput(MoveBuf& mov, float dax, float day, float daz, float sensitiv
     Quaternion qRoll  = quatFromAxisAngle(forward.x, forward.y, forward.z, roll);
 
     // apply them to orientation
-    mov.orientation = quatMultiply(mov.orientation, qYaw);
-    mov.orientation = quatMultiply(mov.orientation, qPitch);
-    mov.orientation = quatMultiply(mov.orientation, qRoll);
+    mov.orientation = (mov.orientation * qYaw);
+    mov.orientation = (mov.orientation * qPitch);
+    mov.orientation = (mov.orientation * qRoll);
 
     // normalize to avoid drift
     mov.orientation = quatNormalize(mov.orientation);
@@ -209,34 +269,52 @@ void applyRotInputAxis(MoveBuf& mov, Vec3 input, const Vec3& worldAxis, const Ve
 
     // --- Alignment correction: chosenRot axis must align with worldRotAxis ---
     Vec3 corrAxis = cross(chosenRot, rotAxis);
-    float corrMag = sqrtf(corrAxis.x*corrAxis.x + corrAxis.y*corrAxis.y + corrAxis.z*corrAxis.z);
-    if (corrMag > 1e-6f) {
+    float corrMag = magnitude(&corrAxis.x);
+    if (corrMag > 1e-8f) {
         corrAxis = {corrAxis.x/corrMag, corrAxis.y/corrMag, corrAxis.z/corrMag};
-        float dotVal = fmaxf(-1.0f, fminf(1.0f, chosenRot.x*rotAxis.x +
-                                          chosenRot.y*rotAxis.y +
-                                          chosenRot.z*rotAxis.z));
+        float dotVal = fmaxf(-1.0f, fminf(1.0f, dot(&chosenRot.x, &rotAxis.x)));
         float corrAngle = acosf(dotVal);
         Quaternion qCorr = quatFromAxisAngle(corrAxis.x, corrAxis.y, corrAxis.z, corrAngle);
-        qTarget = quatMultiply(qCorr, qTarget);
+        qTarget = (qCorr * qTarget);
     }
 
     // Interpolate toward target orientation
     float dp = dot(&mov.orientation.w, &qTarget.w, 4);
     if (dp < 0.0f) {
-        dp = -dp;
-        qTarget.w = -qTarget.w;
-        qTarget.x = -qTarget.x;
-        qTarget.y = -qTarget.y;
-        qTarget.z = -qTarget.z;
+        qTarget *= -1.0f;
     }
-    Quaternion result = {
-        mov.orientation.w + sensitivity*(qTarget.w - mov.orientation.w),
-        mov.orientation.x + sensitivity*(qTarget.x - mov.orientation.x),
-        mov.orientation.y + sensitivity*(qTarget.y - mov.orientation.y),
-        mov.orientation.z + sensitivity*(qTarget.z - mov.orientation.z)
-    };
+    Quaternion result = mov.orientation + (sensitivity*(qTarget - mov.orientation));
     mov.orientation = quatNormalize(result);
     mov.orientation = quatNormalize(mov.orientation);
+}
+
+void applyRotInputAxis2(MoveBuf& mov, Vec3 input, const Vec3& worldAxis, const Vec3& shipRot, const float sensitivity)
+{
+    // Compute desired angle from joystick
+    // Example: use atan2 for 2D joystick input
+    if (input.x == 0 && input.y == 0) return;
+    float angle = atan2f(input.x, input.y); // radians
+
+    // Normalize world axis
+    if (worldAxis.x == 0 && worldAxis.y == 0 && worldAxis.z == 0) return;
+    Vec3 rotAxis = normalize(worldAxis);
+
+    // Build target quaternion from axis + angle
+    Quaternion qTarget = quatFromAxisAngle(rotAxis.x, rotAxis.y, rotAxis.z, angle);
+    qTarget = quatNormalize(qTarget);
+
+    // Interpolate toward target orientation
+    float dp = dot(&mov.orientation.w, &qTarget.w, 4);
+    if (dp < 0.0f) {
+        qTarget *= -1.0f;
+    }
+    Quaternion step = mov.orientation + (sensitivity*(qTarget - mov.orientation));
+    step = quatNormalize(step);
+    Vec3 currentAxis = rotateVector(step, shipRot);
+    currentAxis = normalize(currentAxis);
+    Quaternion qAlign = quatAlign(currentAxis, rotAxis);
+    qAlign = quatNormalize(qAlign);
+    mov.orientation = quatNormalize(qAlign * step);
 }
 
 void applyRotInputDirect(MoveBuf& mov, Vec3 input, Vec3 screenUp, float sensitivity)
@@ -267,67 +345,10 @@ void applyRotInputDirect(MoveBuf& mov, Vec3 input, Vec3 screenUp, float sensitiv
     float dp = dot(&mov.orientation.w, &qTarget.w, 4);
     if (dp < 0.0f) {
         dp = -dp;
-        qTarget.w = -qTarget.w;
-        qTarget.x = -qTarget.x;
-        qTarget.y = -qTarget.y;
-        qTarget.z = -qTarget.z;
+        qTarget *= -1.0f;
     }
-    Quaternion result = {
-        mov.orientation.w + sensitivity*(qTarget.w - mov.orientation.w),
-        mov.orientation.x + sensitivity*(qTarget.x - mov.orientation.x),
-        mov.orientation.y + sensitivity*(qTarget.y - mov.orientation.y),
-        mov.orientation.z + sensitivity*(qTarget.z - mov.orientation.z)
-    };
+    Quaternion result = mov.orientation + (sensitivity*(qTarget - mov.orientation));
     mov.orientation = quatNormalize(result);
-}
-
-void centerAndScale(WireframeModel& model, float targetSize)
-{
-    if (model.verts.empty()) return;
-
-    // Step 1: bounding box
-    float minX = model.verts[0].x, maxX = model.verts[0].x;
-    float minY = model.verts[0].y, maxY = model.verts[0].y;
-    float minZ = model.verts[0].z, maxZ = model.verts[0].z;
-
-    for (auto& v : model.verts) {
-        if (v.x < minX) minX = v.x;
-        if (v.x > maxX) maxX = v.x;
-        if (v.y < minY) minY = v.y;
-        if (v.y > maxY) maxY = v.y;
-        if (v.z < minZ) minZ = v.z;
-        if (v.z > maxZ) maxZ = v.z;
-    }
-
-    // Step 2: center
-    float cx = (minX + maxX) * 0.5f;
-    float cy = (minY + maxY) * 0.5f;
-    float cz = (minZ + maxZ) * 0.5f;
-
-    // Step 3: subtract center
-    for (auto& v : model.verts) {
-        v.x -= cx;
-        v.y -= cy;
-        v.z -= cz;
-    }
-
-    // Step 4: largest extent
-    float extentX = maxX - minX;
-    float extentY = maxY - minY;
-    float extentZ = maxZ - minZ;
-    float maxExtent = std::max({extentX, extentY, extentZ});
-
-    if (maxExtent < 1e-6f) return; // avoid div by zero
-
-    // Step 5: scale factor
-    float scale = targetSize / maxExtent;
-
-    // Step 6: apply scale
-    for (auto& v : model.verts) {
-        v.x *= scale;
-        v.y *= scale;
-        v.z *= scale;
-    }
 }
 
 // -----------------------------
@@ -336,8 +357,8 @@ void centerAndScale(WireframeModel& model, float targetSize)
 void transformModel(ModelBuf* buf, const MoveBuf& mov)
 {
     // Convert orientation quaternion to rotation matrix
-    float R[3][3];
-    quatToMatrix(mov.orientation, R);
+    //float R[3][3];
+    //quatToMatrix(mov.orientation, R);
 
     for (int i=0; i<buf->model->vertCount; i++) {
         // Original model-space vertex
@@ -347,14 +368,12 @@ void transformModel(ModelBuf* buf, const MoveBuf& mov)
         Vec3 vr = rotateVector(mov.orientation, v);
 
         // Translate by ship’s world position
-        vr.x += mov.pos.x;
-        vr.y += mov.pos.y;
-        vr.z += mov.pos.z;
+        vr += mov.pos;
 
         buf->vertbuf[i].pos3D = vr;
 
         // --- Project to 2D ---
-        float denom = vr.z + 4.0f;
+        float denom = vr.z;
         if (denom < 0.1f) {
             buf->vertbuf[i].pos2D.x = (int)g_cX;
             buf->vertbuf[i].pos2D.y = (int)g_cY;
@@ -365,9 +384,6 @@ void transformModel(ModelBuf* buf, const MoveBuf& mov)
     }
 }
 
-
-
-
 inline bool faceVisible(const VertexBuf* buf,
                         const int* indices, int count)
 {
@@ -375,8 +391,8 @@ inline bool faceVisible(const VertexBuf* buf,
     Vec3 a = buf[indices[0]].pos3D;
     Vec3 b = buf[indices[1]].pos3D;
     Vec3 c = buf[indices[2]].pos3D;
-    Vec3 u = { b.x - a.x, b.y - a.y, b.z - a.z };
-    Vec3 v = { c.x - a.x, c.y - a.y, c.z - a.z };
+    Vec3 u = b - a;
+    Vec3 v = c - a;
     Vec3 n = { u.y*v.z - u.z*v.y,
                u.z*v.x - u.x*v.z,
                u.x*v.y - u.y*v.x };

@@ -5,8 +5,6 @@
 #include "HardwareSerial.h"
 #include "MCP4922DMA.h"
 #include "ErrorHandler.h"
-
-#include <string.h>
 #include <Arduino.h>
 #include <driver/spi_master.h>
 #include <driver/gpio.h>

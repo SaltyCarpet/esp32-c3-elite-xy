@@ -2,7 +2,14 @@
 #include <math.h>
 #include "esp_dsp.h"   // ESP-DSP library
 #include "MathHelpers.h"
-#include "ErrorHandler.h"
+#include <random>
+
+// Random helper
+float randFloat(float min, float max) {
+    static std::mt19937 rng{std::random_device{}()};
+    std::uniform_real_distribution<float> dist(min, max);
+    return dist(rng);
+}
 
 // -----------------------------
 // Math helpers
@@ -12,24 +19,24 @@
 #if defined(CONFIG_IDF_TARGET_ESP32S3) || defined(ARDUINO_ESP32S3)
   #include "esp_dsp.h"
 
-  float fastSin(float x) {
+  float fastSin(const float x) {
     return sinf(x); //dsps_sin_f32_ansi(x);
   }
 
-  float fastCos(float x) {
+  float fastCos(const float x) {
     return cosf(x); //dsps_cos_f32_ansi(x);
   }
 
-  float fastSqrt(float x) {
+  float fastSqrt(const float x) {
     return dsps_sqrtf_f32_ansi(x);
   }
 
-  float fastInvSqrt(float x)
+  float fastInvSqrt(const float x)
   {
     return 1.0f/fastSqrt(x);
   }
 
-  float dot(const float* u, const float* v, int dim) {
+  float dot(const float* u, const float* v, const int dim) {
     // ESP-DSP dot product
     float res = 0;
     esp_err_t err = dsps_dotprod_f32_aes3(u, v, &res, dim);
@@ -39,19 +46,19 @@
 
 #else
   // Fallback for other ESP32 variants or generic Arduino
-  float fastSin(float x) {
+  float fastSin(const float x) {
     return sinf(x);
   }
 
-  float fastCos(float x) {
+  float fastCos(const float x) {
     return cosf(x);
   }
 
-  float fastSqrt(float x) {
+  float fastSqrt(const float x) {
     return sqrtf(x);
   }
 
-  float fastInvSqrt(float x) {
+  float fastInvSqrt(const float x) {
     float half = 0.5f * x;
     int i = *(int*)&x;
     i = 0x5f3759df - (i >> 1);
@@ -59,7 +66,7 @@
     return y * (1.5f - half * y * y);
   }
 
-  float dot(const float* u, const float* v, int dim) {
+  float dot(const float* u, const float* v, const int dim) {
     float res = 0;
     for(int i = 0; i < dim; i++)
     {
@@ -71,10 +78,14 @@
 #endif
 
 
+float magnitude(const float* in, const int dim) {
+  return fastSqrt(dot(in, in, dim));
+}
+
 Vec3 normalize(const Vec3& v) {
-    float mag = fastInvSqrt(v.x*v.x + v.y*v.y + v.z*v.z);
-    if (mag > 1e+6f) return {0,0,0};
-    return {v.x*mag, v.y*mag, v.z*mag};
+  float mag = magnitude(&v.x);
+  if (mag < 1e-8f) return {0,0,0};
+  return v/mag;
 }
 
 Vec3 cross(const Vec3& u, const Vec3& v) {
@@ -95,24 +106,12 @@ Quaternion quatConjugate(const Quaternion& q) {
 }
 
 Quaternion quatNormalize(const Quaternion& q) {
-  float vals[4] = { q.w, q.x, q.y, q.z };
-  float mag2 = dot(vals, vals, 4);
-  if (mag2 < 1e-8f) return quatIdentity();
-  float invmag = fastInvSqrt(mag2);
-  return { q.w*invmag, q.x*invmag, q.y*invmag, q.z*invmag };
+  float mag = magnitude(&q.w, 4);
+  if (mag < 1e-6f) return quatIdentity();
+  return q/mag;
 }
 
-Quaternion quatMultiply(const Quaternion& a, const Quaternion& b) {
-  // Compiler will fuse multiply-adds with -Ofast
-  return {
-    a.w*b.w - a.x*b.x - a.y*b.y - a.z*b.z,
-    a.w*b.x + a.x*b.w + a.y*b.z - a.z*b.y,
-    a.w*b.y - a.x*b.z + a.y*b.w + a.z*b.x,
-    a.w*b.z + a.x*b.y - a.y*b.x + a.z*b.w
-  };
-}
-
-Quaternion quatFromAxisAngle(float ax, float ay, float az, float angle) {
+Quaternion quatFromAxisAngle(const float ax, const float ay, const float az, const float angle) {
   float half = 0.5f * angle;
   float s = fastSin(half);
   float c = fastCos(half);
@@ -123,21 +122,18 @@ Vec3 rotateVector(const Quaternion& q, const Vec3& v) {
   // v' = q * (0,v) * q^-1
   Quaternion vq = {0, v.x, v.y, v.z};
   Quaternion qConj = quatConjugate(q);
-  Quaternion rq = quatMultiply(quatMultiply(q, vq), qConj);
+  Quaternion rq = ((q * vq) * qConj);
   return { rq.x, rq.y, rq.z };
 }
 
 void integrateOrientation(Quaternion& q, const Vec3& angVel, float dt) {
-  float vals[3] = { angVel.x, angVel.y, angVel.z };
-  float mag2 = dot(vals, vals, 3);
-  if (mag2 > 1e-12f) {
-    float invmag = fastInvSqrt(mag2);
-    float half = 0.5f * dt / invmag;
-    float s = fastSin(half) * invmag;
-    float c = fastCos(half);
-    Quaternion dq = { c, angVel.x*s, angVel.y*s, angVel.z*s };
-    q = quatNormalize(quatMultiply(q, dq));
-  }
+  float mag = magnitude(&angVel.x);
+  if (mag > 1e-8f) return;
+  float half = 0.5f * dt * mag;
+  float s = fastSin(half) / mag;
+  float c = fastCos(half);
+  Quaternion dq = { c, angVel.x*s, angVel.y*s, angVel.z*s };
+  q = quatNormalize(q * dq);
 }
 
 void quatToMatrix(const Quaternion& q, float M[3][3]) {
@@ -163,29 +159,53 @@ Quaternion quatFromRotationMatrix(float m[3][3]) {
     Quaternion q;
     float trace = m[0][0] + m[1][1] + m[2][2];
     if (trace > 0.0f) {
-        float s = fastInvSqrt(trace + 1.0f) / 2.0f;
-        q.w = 0.25f / s;
-        q.x = (m[2][1] - m[1][2]) * s;
-        q.y = (m[0][2] - m[2][0]) * s;
-        q.z = (m[1][0] - m[0][1]) * s;
+        float s = fastSqrt(trace + 1.0f) * 2.0f;
+        q.w = 0.25f * s;
+        q.x = (m[2][1] - m[1][2]) / s;
+        q.y = (m[0][2] - m[2][0]) / s;
+        q.z = (m[1][0] - m[0][1]) / s;
     } else if ((m[0][0] > m[1][1]) && (m[0][0] > m[2][2])) {
-        float s = fastInvSqrt(1.0f + m[0][0] - m[1][1] - m[2][2]) / 2.0f;
-        q.w = (m[2][1] - m[1][2]) * s;
-        q.x = 0.25f / s;
-        q.y = (m[0][1] + m[1][0]) * s;
-        q.z = (m[0][2] + m[2][0]) * s;
+        float s = fastSqrt(1.0f + m[0][0] - m[1][1] - m[2][2]) * 2.0f;
+        q.w = (m[2][1] - m[1][2]) / s;
+        q.x = 0.25f * s;
+        q.y = (m[0][1] + m[1][0]) / s;
+        q.z = (m[0][2] + m[2][0]) / s;
     } else if (m[1][1] > m[2][2]) {
-        float s = fastInvSqrt(1.0f + m[1][1] - m[0][0] - m[2][2]) / 2.0f;
-        q.w = (m[0][2] - m[2][0]) * s;
-        q.x = (m[0][1] + m[1][0]) * s;
-        q.y = 0.25f / s;
-        q.z = (m[1][2] + m[2][1]) * s;
+        float s = fastSqrt(1.0f + m[1][1] - m[0][0] - m[2][2]) * 2.0f;
+        q.w = (m[0][2] - m[2][0]) / s;
+        q.x = (m[0][1] + m[1][0]) / s;
+        q.y = 0.25f * s;
+        q.z = (m[1][2] + m[2][1]) / s;
     } else {
-        float s = fastInvSqrt(1.0f + m[2][2] - m[0][0] - m[1][1]) / 2.0f;
-        q.w = (m[1][0] - m[0][1]) * s;
-        q.x = (m[0][2] + m[2][0]) * s;
-        q.y = (m[1][2] + m[2][1]) * s;
-        q.z = 0.25f / s;
+        float s = fastSqrt(1.0f + m[2][2] - m[0][0] - m[1][1]) * 2.0f;
+        q.w = (m[1][0] - m[0][1]) / s;
+        q.x = (m[0][2] + m[2][0]) / s;
+        q.y = (m[1][2] + m[2][1]) / s;
+        q.z = 0.25f * s;
     }
     return q;
+}
+
+Quaternion quatAlign(const Vec3& from, const Vec3& to) {
+    Vec3 f = normalize(from);
+    Vec3 t = normalize(to);
+
+    float dotVal = fmaxf(-1.0f, fminf(1.0f, dot(&f.x, &t.x)));
+    Vec3 axis = cross(f, t);
+
+    if (magnitude(&axis.x) < 1e-8f) {
+        // Vectors are parallel
+        if (dotVal > (1.0f - 1e-8f)) {
+            return {1,0,0,0}; // identity
+        } else {
+            // 180° rotation around any perpendicular axis
+            Vec3 ortho = (fabs(f.x) > fabs(f.z)) ? Vec3{-f.y, f.x, 0} : Vec3{0, -f.z, f.y};
+            ortho = normalize(ortho);
+            return quatFromAxisAngle(ortho.x, ortho.y, ortho.z, M_PI);
+        }
+    }
+
+    axis = normalize(axis);
+    float angle = acosf(dotVal);
+    return quatFromAxisAngle(axis.x, axis.y, axis.z, angle);
 }
