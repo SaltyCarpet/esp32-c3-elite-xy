@@ -10,4 +10,4 @@ enum SystemStatus {
 };
 
 void setStatus(SystemStatus status);
-void errorHandlerSetup(int led_pin);
+void errorHandlerSetup();

@@ -11,10 +11,12 @@
 #define CMD_LEN  7
 
 #define DEPTH 15
-#define POSLIM DEPTH/2
+#define POSLIM DEPTH/2.1f
 
 float asteroidTime = 0;
 float asteroidDif = 1;
+
+int score = 0;
 
 ModelBuf shipbuffer;
 ModelBuf asteroidbuffer;
@@ -45,6 +47,8 @@ std::unordered_map<int, std::function<void(float)>> keyMap = {
 
   { 0, [](float v){ if (v > 0.5f) playerShoot(); } },
   { 1, [](float v){ if (v > 0.5f) resetGame(); } },
+  { 2, [](float v){ if (v > 0.5f) createRandomAsteroid(); } },
+  { 3, [](float v){ if (v > 0.5f) printShipPos(shipmover); } },
   { KEY_OFFSET, [](float v){ kdDir.x = v;} },
   { KEY_OFFSET + 1, [](float v){ kdDir.y = -v;} },
   { KEY_OFFSET + 4, [](float v){ kd.trans.z = -(1+v)/2; } },
@@ -141,9 +145,18 @@ void playerShoot()
 
 inline void updateMissiles(float dt)
 {
-        for (auto& missile : missilemover)
+    for (auto& missile : missilemover)
     {
         moveBufUpdater(missile, Zero, linlim, dt);
+        for (auto& asteroid : asteroidmover)
+        {
+            if (collideSphere(missile, asteroid, missilebuffer.radius, asteroidbuffer.radius))
+            {
+                asteroid.health = 0;
+                missile.health = 0;
+                score += 1;
+            }
+        }
         if (!isModelOnScreen(missile))
         {
             missile.health = 0;
@@ -160,6 +173,8 @@ inline void updateMissiles(float dt)
 // Create a random asteroid MoveBuf
 void createRandomAsteroid()
 {
+    if (asteroidmover.size() > 10) return;
+
     MoveBuf asteroid;
 
     // --- pick a random side ---
@@ -182,8 +197,8 @@ void createRandomAsteroid()
             target = {b, -POSLIM, DEPTH};
             break;
         case 3: // bottom edge
-            start = {a, POSLIM, DEPTH};
-            target = {b, -POSLIM, DEPTH};
+            start = {a, -POSLIM, DEPTH};
+            target = {b, POSLIM, DEPTH};
             break;
     }
 
@@ -191,19 +206,19 @@ void createRandomAsteroid()
     asteroid.pos = start;
 
     // --- orientation ---
-    asteroid.orientation = {0,0,0,0};
-    asteroid.angVel = {randFloat(-0.5f, 0.5f),
-                       randFloat(-0.5f, 0.5f),
-                       randFloat(-0.5f, 0.5f)};
+    asteroid.orientation = quatIdentity();
+    float maxrot = 20.0f;
+    asteroid.angVel = {randFloat(-maxrot, maxrot),
+                       randFloat(-maxrot, maxrot),
+                       randFloat(-maxrot, maxrot)};
     asteroid.angAcc = {0,0,0};
 
     // --- linear velocity ---
     Vec3 dir = target - start;
-    float len = sqrt(dir.x*dir.x + dir.y*dir.y + dir.z*dir.z);
-    if (len > 0.001f) {
-        dir = dir * (1.0f / len); // normalize
-    }
-    asteroid.linVel = dir * randFloat(5, 20);
+    dir = normalize(dir);
+    if (dir.x == 0 && dir.y == 0 && dir.z == 0) return;
+
+    asteroid.linVel = dir * randFloat(0.5f, 2);
     asteroid.linAcc = {0,0,0};
 
     asteroidmover.push_back(asteroid);
@@ -211,9 +226,13 @@ void createRandomAsteroid()
 
 inline void updateAsteroids(float dt)
 {
-        for (auto& asteroid : asteroidmover)
+    for (auto& asteroid : asteroidmover)
     {
         moveBufUpdater(asteroid, Zero, linlim, dt);
+        if (collideSphere(shipmover, asteroid, shipbuffer.radius, asteroidbuffer.radius))
+        {
+            shipmover.health = 0;
+        }
         if (!isModelOnScreen(asteroid))
         {
             asteroid.health = 0;
@@ -236,14 +255,20 @@ void updateGame(float dt)
     shipmover.pos.z = DEPTH;
 
     updateMissiles(dt);
-    //updateAsteroids(dt);
+    updateAsteroids(dt);
 
-    //asteroidTime += dt;
-    //if (asteroidDif > asteroidTime)
-    //{
-    //    createRandomAsteroid();
-    //    asteroidTime = 0.0f;
-    //}
+    asteroidTime += dt;
+    if (asteroidDif < asteroidTime)
+    {
+        createRandomAsteroid();
+        asteroidTime = 0.0f;
+    }
+
+    if(shipmover.health == 0)
+    {
+        shipmover.health = 1;
+        resetGame();
+    }
 }
 
 void drawModels()
@@ -258,10 +283,21 @@ void drawModels()
         transformModel(&missilebuffer, missile);
         wireframeDrawCulled(&missilebuffer, 3);
     }
+
+    for (auto& asteroid : asteroidmover)
+    {
+        transformModel(&asteroidbuffer, asteroid);
+        wireframeDrawCulled(&asteroidbuffer, 3);
+    }
+
+    drawText(std::to_string(score), 2048, 2048, 10, 3);
 }
 
 void resetGame()
 {
+    score = 0;
     missilemover.clear();
+    asteroidmover.clear();
     clearMovBufs(shipmover, kd);
+    Serial.println("RESET");
 }

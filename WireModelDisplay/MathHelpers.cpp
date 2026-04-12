@@ -2,6 +2,7 @@
 #include <math.h>
 #include "esp_dsp.h"   // ESP-DSP library
 #include "MathHelpers.h"
+#include "ErrorHandler.h"
 #include <random>
 
 // Random helper

@@ -9,9 +9,7 @@
 
 struct WireframeModel {
     std::vector<Vec3> verts;
-    std::vector<int>  faces;
-    uint vertCount = 0;
-    uint faceIndexCount = 0;
+    std::vector<std::vector<int>>  faces;
 };
 
 struct VertexBuf {
@@ -21,7 +19,7 @@ struct VertexBuf {
 
 struct ModelBuf {
     const WireframeModel* model = nullptr;
-    VertexBuf vertbuf[64];
+    std::vector<VertexBuf> vertbuf;
     float radius;
 };
 
@@ -58,7 +56,7 @@ void wireframeInit(int centerX, int centerY, int scale);
 bool loadWRL(const char* path, WireframeModel& model);
 void listLittleFS();
 bool centerAndScale(ModelBuf& buf, WireframeModel& model, float targetSize);
-//bool collideSphere(const ModelBuf& a, const ModelBuf& b);
+bool collideSphere(const MoveBuf& a, const MoveBuf& b, const float ar, const float br);
 void applyRotInput(MoveBuf& mov, float dax, float day, float daz, float sensitivity);
 void applyRotInputAxis(MoveBuf& mov, Vec3 input, const Vec3& worldAxis, const Vec3& shipRot, const float sensitivity);
 void applyRotInputAxis2(MoveBuf& mov, Vec3 input, const Vec3& worldAxis, const Vec3& shipRot, const float sensitivity);

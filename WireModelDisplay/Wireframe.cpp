@@ -89,17 +89,29 @@ bool loadWRL(const char* path, WireframeModel& model) {
         else if (section == INDICES) {
             int idx;
             const char* cstr = line.c_str();
-            while (sscanf(cstr, "%d", &idx) == 1) {
-                model.faces.push_back(idx);
-                // advance pointer to next number
+            std::vector<int> currentFace;
+            while (*cstr) {
+                if (sscanf(cstr, "%d", &idx) == 1) {
+                    if (idx == -1) {
+                        if (!currentFace.empty()) {
+                            model.faces.push_back(currentFace);
+                            currentFace.clear();
+                        }
+                    } else {
+                        currentFace.push_back(idx);
+                    }
+                }
+                // advance pointer
                 while (*cstr && !isspace(*cstr) && *cstr!=',') ++cstr;
                 while (*cstr && (isspace(*cstr) || *cstr==',')) ++cstr;
             }
+            // in case line ended without -1
+            if (!currentFace.empty()) {
+                model.faces.push_back(currentFace);
+            }
         }
-
     }
-    model.vertCount = model.verts.size();
-    model.faceIndexCount = model.faces.size();
+
     file.close();
     return true;
 }
@@ -210,17 +222,14 @@ void clearMovBufs(MoveBuf& mov, KeyDir& kd)
     kd.angle = {0,0,0};
     kd.trans = {0,0,0};
 }
-/*
+
 // -------------------- Collision Check --------------------
-bool collideSphere(const ModelBuf& a, const ModelBuf& b) {
-    float dx = a.pos.x - b.center.x;
-    float dy = a.pos3D.y - b.center.y;
-    float dz = a.center.z - b.center.z;
-    float dist2 = dx*dx + dy*dy + dz*dz;
-    float rsum = a.radius + b.radius;
-    return dist2 <= rsum*rsum;
+bool collideSphere(const MoveBuf& a, const MoveBuf& b, const float ar, const float br) {
+    Vec3 d = a.pos - b.pos;
+    float dist = magnitude(&d.x);
+    float rsum = ar + br;
+    return dist <= rsum;
 }
-*/
 
 void applyRotInput(MoveBuf& mov, float dax, float day, float daz, float sensitivity)
 {
@@ -356,11 +365,10 @@ void applyRotInputDirect(MoveBuf& mov, Vec3 input, Vec3 screenUp, float sensitiv
 // -----------------------------
 void transformModel(ModelBuf* buf, const MoveBuf& mov)
 {
-    // Convert orientation quaternion to rotation matrix
-    //float R[3][3];
-    //quatToMatrix(mov.orientation, R);
-
-    for (int i=0; i<buf->model->vertCount; i++) {
+    buf->vertbuf.clear();
+    buf->vertbuf.reserve(buf->model->verts.size());
+    VertexBuf vertexBuf;
+    for (int i=0; i<buf->model->verts.size(); i++) {
         // Original model-space vertex
         Vec3 v = buf->model->verts[i];
 
@@ -370,53 +378,61 @@ void transformModel(ModelBuf* buf, const MoveBuf& mov)
         // Translate by ship’s world position
         vr += mov.pos;
 
-        buf->vertbuf[i].pos3D = vr;
+        vertexBuf.pos3D = vr;
 
         // --- Project to 2D ---
         float denom = vr.z;
         if (denom < 0.1f) {
-            buf->vertbuf[i].pos2D.x = (int)g_cX;
-            buf->vertbuf[i].pos2D.y = (int)g_cY;
-            continue;
+            vertexBuf.pos2D.x = (int)g_cX;
+            vertexBuf.pos2D.y = (int)g_cY;
         }
-        buf->vertbuf[i].pos2D.x = g_cX + (int)lrintf(vr.x * (float)g_scale / denom);
-        buf->vertbuf[i].pos2D.y = g_cY + (int)lrintf(vr.y * (float)g_scale / denom);
+        else
+        {
+            vertexBuf.pos2D.x = g_cX + (int)lrintf(vr.x * (float)g_scale / denom);
+            vertexBuf.pos2D.y = g_cY + (int)lrintf(vr.y * (float)g_scale / denom);
+        }
+
+        buf->vertbuf.push_back(vertexBuf);
     }
 }
 
 inline bool faceVisible(const VertexBuf* buf,
-                        const int* indices, int count)
+                        const int* indices)
 {
-    if (count < 3) return false;
     Vec3 a = buf[indices[0]].pos3D;
     Vec3 b = buf[indices[1]].pos3D;
     Vec3 c = buf[indices[2]].pos3D;
     Vec3 u = b - a;
     Vec3 v = c - a;
-    Vec3 n = { u.y*v.z - u.z*v.y,
-               u.z*v.x - u.x*v.z,
-               u.x*v.y - u.y*v.x };
-    return (n.z > 1e-5f); // flip sign if needed
+    Vec3 n = cross(u, v);
+    return (n.z > 1e-8f); // flip sign if needed
 }
 
 void wireframeDrawCulled(const ModelBuf* buf,
                          uint16_t brightness)
 {
-    int start = 0;
-    for (int i=0; i<buf->model->faceIndexCount; i++) {
-        if (buf->model->faces[i] == -1) {
-            int end = i;
-            int count = end - start;
-            if ((count >= 3 && faceVisible(buf->vertbuf, &buf->model->faces[start], count))||count == 2) {
-                for (int j=0; j<count; j++) {
-                    int a = buf->model->faces[start + j];
-                    int b = buf->model->faces[start + ((j+1)%count)];
+    for (const auto& face : buf->model->faces) {
+        int count = face.size();
+
+        if (count >= 3) {
+            // Only draw if face is visible
+            if (faceVisible(buf->vertbuf.data(), face.data())) {
+                for (int j = 0; j < count; j++) {
+                    int a = face[j];
+                    int b = face[(j+1) % count];
                     drawLineBresenham(buf->vertbuf[a].pos2D.x, buf->vertbuf[a].pos2D.y,
                                       buf->vertbuf[b].pos2D.x, buf->vertbuf[b].pos2D.y,
                                       brightness);
                 }
             }
-            start = i+1;
+        }
+        else if (count == 2) {
+            // Always draw edges (not culled)
+            int a = face[0];
+            int b = face[1];
+            drawLineBresenham(buf->vertbuf[a].pos2D.x, buf->vertbuf[a].pos2D.y,
+                              buf->vertbuf[b].pos2D.x, buf->vertbuf[b].pos2D.y,
+                              brightness);
         }
     }
 }
@@ -424,21 +440,16 @@ void wireframeDrawCulled(const ModelBuf* buf,
 void wireframeDrawAll(const ModelBuf* buf,
                       uint16_t brightness)
 {
-    int start = 0;
-    for (int i=0; i<buf->model->faceIndexCount; i++) {
-        if (buf->model->faces[i] == -1) {
-            int end = i;
-            int count = end - start;
-            if (count >= 2) {
-                for (int j=0; j<count; j++) {
-                    int a = buf->model->faces[start + j];
-                    int b = buf->model->faces[start + ((j+1)%count)];
-                    drawLineBresenham(buf->vertbuf[a].pos2D.x, buf->vertbuf[a].pos2D.y,
-                                      buf->vertbuf[b].pos2D.x, buf->vertbuf[b].pos2D.y,
-                                      brightness);
-                }
+    for (const auto& face : buf->model->faces) {
+        int count = face.size();
+        if (count >= 2) {
+            for (int j = 0; j < count; j++) {
+                int a = face[j];
+                int b = face[(j+1) % count];
+                drawLineBresenham(buf->vertbuf[a].pos2D.x, buf->vertbuf[a].pos2D.y,
+                                  buf->vertbuf[b].pos2D.x, buf->vertbuf[b].pos2D.y,
+                                  brightness);
             }
-            start = i+1;
         }
     }
 }

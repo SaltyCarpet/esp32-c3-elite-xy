@@ -1,40 +1,50 @@
-#include <Adafruit_NeoPixel.h>
 #include "ErrorHandler.h"
+#include <Adafruit_NeoPixel.h>
 
-#define NUMPIXELS   1
+namespace {
 
-Adafruit_NeoPixel pixels;
+constexpr uint16_t NUMPIXELS = 1;
+constexpr int DEVKITC1_V10_RGB_PIN = 48;
+constexpr int DEVKITC1_V11_RGB_PIN = 38;
 
-void setStatus(SystemStatus status) {
-  uint32_t color;
+Adafruit_NeoPixel pixels_v10(NUMPIXELS, DEVKITC1_V10_RGB_PIN, NEO_GRB + NEO_KHZ800);
+Adafruit_NeoPixel pixels_v11(NUMPIXELS, DEVKITC1_V11_RGB_PIN, NEO_GRB + NEO_KHZ800);
 
+void setStripColor(Adafruit_NeoPixel& strip, uint32_t color) {
+  strip.setPixelColor(0, color);
+  strip.show();
+}
+
+uint32_t statusColor(SystemStatus status) {
   switch (status) {
     case STATUS_OK:
-      color = pixels.Color(0, 255, 0);   // Green
-      break;
+      return pixels_v11.Color(0, 255, 0);   // Green
     case STATUS_WARNING:
-      color = pixels.Color(255, 165, 0); // Orange
-      break;
+      return pixels_v11.Color(255, 165, 0); // Orange
     case STATUS_ERROR:
-      color = pixels.Color(255, 0, 0);   // Red
-      break;
+      return pixels_v11.Color(255, 0, 0);   // Red
     case STATUS_BUSY:
-      color = pixels.Color(0, 0, 255);   // Blue
-      break;
+      return pixels_v11.Color(0, 0, 255);   // Blue
     default:
-      color = pixels.Color(0, 0, 0);     // Off
-      break;
+      return pixels_v11.Color(0, 0, 0);     // Off
   }
+}
 
-  pixels.setPixelColor(0, color);
-  pixels.show();
+}  // namespace
 
+void setStatus(SystemStatus status) {
+  const uint32_t color = statusColor(status);
+  setStripColor(pixels_v10, color);
+  setStripColor(pixels_v11, color);
+
+  // Intentional fatal stop on error.
   while(status == STATUS_ERROR) {}
 }
 
-void errorHandlerSetup(int led_pin) {
-  pixels = Adafruit_NeoPixel(NUMPIXELS, led_pin, NEO_GRB + NEO_KHZ800);
-  pixels.begin();
-  pixels.setBrightness(50); // dim to save power
+void errorHandlerSetup() {
+  pixels_v10.begin();
+  pixels_v11.begin();
+  pixels_v10.setBrightness(50);
+  pixels_v11.setBrightness(50);
   setStatus(STATUS_OK);     // start as OK
 }

@@ -41,7 +41,7 @@ void setup() {
   Serial.begin(115200);
   delay(100);
   //reboot_after_flash();
-  errorHandlerSetup(LED_PIN);
+  errorHandlerSetup();
   setStatus(STATUS_BUSY);
   Serial.println("Ready");
   Serial.printf("Free heap: %lu bytes\n", ESP.getFreeHeap());
