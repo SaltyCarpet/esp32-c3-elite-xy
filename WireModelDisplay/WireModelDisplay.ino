@@ -60,27 +60,14 @@ void setup() {
     Serial.println("Starting Game Failed");
     return;
   }
-  Serial.println("Started Game.");
+  // Start game update/draw as a separate task
+  startGameTask();
 
   setStatus(STATUS_OK);
   Serial.println("Setup finished");
 }
 
 void loop() {
-
   serialInterface();
-  //Serial.printf("cmd=%d dx=%d dy=%d kd: ax=%d ay=%d az=%d tx=%d ty=%d tz=%d\n",
-  //            cmd, dx, dy, kd.max, kd.may, kd.maz, kd.mtx, kd.mty, kd.mtz);
-
-
-  unsigned long now = millis();
-  if((now - c_millis) > frameTime)
-  {
-    float dt = (now - c_millis) / 1000.0f; // convert ms → seconds
-    if (dt > 0.1f) dt = 0.1f;              // clamp to avoid spikes
-    c_millis = now;
-
-    updateGame(dt);
-    drawModels();
-  }
+  vTaskDelay(pdMS_TO_TICKS(1));
 }

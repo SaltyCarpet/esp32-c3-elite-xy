@@ -8,58 +8,150 @@
 #include <Arduino.h>
 #include <driver/spi_master.h>
 #include <driver/gpio.h>
-#include <esp_heap_caps.h>
 #include <esp_err.h>
+#include <hal/spi_ll.h>
 #include <soc/gpio_struct.h>
+#include <soc/io_mux_reg.h>
 
 #ifndef ESP_ERROR_CHECK
-#define ESP_ERROR_CHECK(x) do { esp_err_t __err = (x); if (__err != ESP_OK) { 
-  Serial.printf("ESP_ERROR at %s:%d code=%d\n", __FILE__, __LINE__, (int)__err); setStatus(STATUS_ERROR); abort(); 
-  } } while(0)
+#define ESP_ERROR_CHECK(x) do {                                                          \
+    esp_err_t __err = (x);                                                               \
+    if (__err != ESP_OK) {                                                               \
+        Serial.printf("ESP_ERROR at %s:%d code=%d\n", __FILE__, __LINE__, (int)__err);  \
+        setStatus(STATUS_ERROR);                                                         \
+        abort();                                                                         \
+    }                                                                                    \
+} while (0)
 #endif
 
-// ---------- Config ----------
 #ifndef DEFAULT_SPI_HOST
-#define DEFAULT_SPI_HOST SPI2_HOST // On ESP32-C3, SPI2_HOST is the general-purpose SPI
+#define DEFAULT_SPI_HOST SPI2_HOST
 #endif
 
-// Host/bus
 static spi_device_handle_t s_dev_xy = nullptr;
+static spi_dev_t* s_hw = nullptr;
 static bool s_inited = false;
 
-// LDAC control
+static int s_cs_xy_pin = -1;
 static int s_ldac_pin = -1;
-// Brightness control
 static int s_z_pin_1 = -1;
 static int s_z_pin_2 = -1;
 
-// ISR: pulse LDAC only after B (Y) completes, so A and B latch together. 
-static void IRAM_ATTR spi_post_cb(spi_transaction_t* trans) {
-    // No LDAC here — do it when we get results in task context 
-    // if ((uintptr_t)trans->user == TX_TAG_B) { ldac_pulse_fast(); } 
-    }
+static uint32_t s_cs_mask = 0;
+static uint32_t s_ldac_mask = 0;
+static uint32_t s_z_mask = 0;
+static uint32_t s_z_lut[4] = {};
 
-static inline void ldac_pulse_fast(int brightness)
+static constexpr int kPreferredFspiMosiPin = 11;
+static constexpr int kPreferredFspiSclkPin = 12;
+static constexpr int kPreferredManualCsPin = 10;
+
+static inline void gpio_write_high(uint32_t mask)
 {
-    // Latch new DAC values (LDAC low)
-    gpio_set_level((gpio_num_t)s_ldac_pin, 0);
-    gpio_set_level((gpio_num_t)s_z_pin_1, brightness & 0x1);
-    gpio_set_level((gpio_num_t)s_z_pin_2, (brightness >> 1) & 0x1);
-    // Ensure minimum LDAC low width for MCP4922 (t_LDAC ≥ ~100 ns)
-    // loop with respect to CPU Clock (100ns*0.160GHz)/3CpL =~ 5L < 8:
-    //for(int i = 0; i < 2; i++)
-    //{__asm__ __volatile__("nop");}
-    //Serial.println("pulse");
-    //ets_delay_us(1);
-    // Release LDAC
-    gpio_set_level((gpio_num_t)s_ldac_pin, 1);
+    GPIO.out_w1ts = mask;
 }
 
-// Helper to write 16-bit big-endian into tx_data
-static inline void pack_be16(uint8_t* dst, uint16_t w)
+static inline void gpio_write_low(uint32_t mask)
 {
-    dst[0] = (uint8_t)(w >> 8);
-    dst[1] = (uint8_t)(w & 0xFF);
+    GPIO.out_w1tc = mask;
+}
+
+static void init_fast_gpio(int cs_xy, int z1, int z2, int ldac)
+{
+    s_cs_xy_pin = cs_xy;
+    s_ldac_pin = ldac;
+    s_z_pin_1 = z1;
+    s_z_pin_2 = z2;
+
+    s_cs_mask = (1UL << s_cs_xy_pin);
+    s_ldac_mask = (1UL << s_ldac_pin);
+    s_z_mask = (1UL << s_z_pin_1) | (1UL << s_z_pin_2);
+
+    s_z_lut[0] = 0;
+    s_z_lut[1] = (1UL << s_z_pin_1);
+    s_z_lut[2] = (1UL << s_z_pin_2);
+    s_z_lut[3] = (1UL << s_z_pin_1) | (1UL << s_z_pin_2);
+
+    gpio_config_t io = {};
+    io.pin_bit_mask = (1ULL << s_cs_xy_pin) |
+                      (1ULL << s_ldac_pin) |
+                      (1ULL << s_z_pin_1) |
+                      (1ULL << s_z_pin_2);
+    io.mode = GPIO_MODE_OUTPUT;
+    io.pull_up_en = GPIO_PULLUP_DISABLE;
+    io.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    io.intr_type = GPIO_INTR_DISABLE;
+    ESP_ERROR_CHECK(gpio_config(&io));
+
+    gpio_write_high(s_cs_mask | s_ldac_mask);
+    gpio_write_low(s_z_mask);
+}
+
+static void validate_spi_pin_choices(int mosi, int sclk, int cs_xy)
+{
+    if (mosi == kPreferredFspiMosiPin && sclk == kPreferredFspiSclkPin) {
+        Serial.println("SPI using preferred ESP32-S3 FSPI IOMUX pins GPIO11/GPIO12");
+    } else {
+        Serial.printf("Warning: SPI MOSI/SCLK on GPIO%d/GPIO%d, preferred ESP32-S3 FSPI pins are GPIO11/GPIO12\n",
+                      mosi, sclk);
+    }
+
+    if (cs_xy != kPreferredManualCsPin) {
+        Serial.printf("Warning: manual DAC CS is on GPIO%d, recommended pin is GPIO10 for this wiring\n", cs_xy);
+    }
+}
+
+static void configure_fspi_iomux_if_possible(int mosi, int sclk)
+{
+#if defined(IO_MUX_GPIO11_REG) && defined(IO_MUX_GPIO12_REG) && \
+    defined(FUNC_GPIO11_FSPID) && defined(FUNC_GPIO12_FSPICLK)
+    if (mosi == kPreferredFspiMosiPin && sclk == kPreferredFspiSclkPin) {
+        PIN_FUNC_SELECT(IO_MUX_GPIO11_REG, FUNC_GPIO11_FSPID);
+        PIN_FUNC_SELECT(IO_MUX_GPIO12_REG, FUNC_GPIO12_FSPICLK);
+    }
+#else
+    (void)mosi;
+    (void)sclk;
+#endif
+}
+
+static void prime_spi_device(spi_device_handle_t dev)
+{
+    spi_transaction_t t = {};
+    t.length = 16;
+    t.flags = SPI_TRANS_USE_TXDATA;
+    t.tx_data[0] = 0x00;
+    t.tx_data[1] = 0x00;
+    ESP_ERROR_CHECK(spi_device_transmit(dev, &t));
+}
+
+static inline void IRAM_ATTR spi_wait_idle()
+{
+    while (s_hw->cmd.usr) {}
+}
+
+static inline void IRAM_ATTR latch_with_z(uint8_t brightness)
+{
+    const uint32_t set_mask = s_z_lut[brightness & 0x3];
+    const uint32_t clear_mask = (s_z_mask & ~set_mask) | s_ldac_mask;
+
+    gpio_write_high(set_mask);
+    gpio_write_low(clear_mask);
+    gpio_write_high(s_ldac_mask);
+}
+
+static inline void IRAM_ATTR spi_send_16(uint16_t word)
+{
+    spi_wait_idle();
+
+    s_hw->data_buf[0] = HAL_SPI_SWAP_DATA_TX(word, 16);
+    s_hw->user.usr_mosi = 1;
+    s_hw->ms_dlen.ms_data_bitlen = 15;
+
+    gpio_write_low(s_cs_mask);
+    s_hw->cmd.usr = 1;
+    while (s_hw->cmd.usr) {}
+    gpio_write_high(s_cs_mask);
 }
 
 void MCP4922_DMA_init_dual(
@@ -67,101 +159,65 @@ void MCP4922_DMA_init_dual(
     int cs_xy, int z_1,
     int z_2, int ldac,
     int clock_hz,
-    int /*queue_depth_points unused now*/)
+    int /*queue_depth_points*/)
 {
-  if (s_inited) return;
+    if (s_inited) return;
 
-  s_ldac_pin = ldac;
-  s_z_pin_1  = z_1;
-  s_z_pin_2  = z_2;
+    init_fast_gpio(cs_xy, z_1, z_2, ldac);
+    validate_spi_pin_choices(mosi, sclk, cs_xy);
 
-  // LDAC high idle
-  {
-    gpio_config_t io = {};
-    io.pin_bit_mask = (1ULL << ldac);
-    io.mode = GPIO_MODE_OUTPUT;
-    io.pull_up_en = GPIO_PULLUP_DISABLE;
-    io.pull_down_en = GPIO_PULLDOWN_DISABLE;
-    io.intr_type = GPIO_INTR_DISABLE;
-    ESP_ERROR_CHECK(gpio_config(&io));
-    gpio_set_level((gpio_num_t)ldac, 1);
-  }
-  // Z pins
-  if (z_1 >= 0) { pinMode(z_1, OUTPUT); digitalWrite(z_1, LOW); }
-  if (z_2 >= 0) { pinMode(z_2, OUTPUT); digitalWrite(z_2, LOW); }
+    spi_bus_config_t buscfg = {};
+    buscfg.mosi_io_num = mosi;
+    buscfg.miso_io_num = -1;
+    buscfg.sclk_io_num = sclk;
+    buscfg.quadwp_io_num = -1;
+    buscfg.quadhd_io_num = -1;
+    buscfg.max_transfer_sz = 4;
 
-  // SPI bus (no MISO)
-  spi_bus_config_t buscfg = {};
-  buscfg.mosi_io_num = mosi;
-  buscfg.miso_io_num = -1;
-  buscfg.sclk_io_num = sclk;
-  buscfg.quadwp_io_num = -1;
-  buscfg.quadhd_io_num = -1;
-  buscfg.max_transfer_sz = 64; // 2 x 16-bit fits easily
+    ESP_ERROR_CHECK(spi_bus_initialize(DEFAULT_SPI_HOST, &buscfg, SPI_DMA_CH_AUTO));
+    configure_fspi_iomux_if_possible(mosi, sclk);
 
-  ESP_ERROR_CHECK(spi_bus_initialize(DEFAULT_SPI_HOST, &buscfg, SPI_DMA_CH_AUTO));
+    spi_device_interface_config_t dev = {};
+    dev.clock_speed_hz = clock_hz;
+    dev.mode = 0;
+    dev.spics_io_num = -1;
+    dev.queue_size = 1;
+    dev.flags = SPI_DEVICE_NO_DUMMY;
 
-  // Device (mode 0, MSB first), CS controlled by driver
-  spi_device_interface_config_t dev = {};
-  dev.clock_speed_hz = clock_hz; // try 2-8 MHz first
-  dev.mode = 0;                  // CPOL=0, CPHA=0
-  dev.spics_io_num = cs_xy;
-  dev.queue_size = 4;
-  dev.flags = 0;
-  dev.pre_cb = nullptr;
-  dev.post_cb = nullptr;
+    ESP_ERROR_CHECK(spi_bus_add_device(DEFAULT_SPI_HOST, &dev, &s_dev_xy));
+    prime_spi_device(s_dev_xy);
 
-  ESP_ERROR_CHECK(spi_bus_add_device(DEFAULT_SPI_HOST, &dev, &s_dev_xy));
-  if (!s_dev_xy) {
-    Serial.println("SPI device handle is null!");
-    return;
-  }
+    s_hw = SPI_LL_GET_HW(DEFAULT_SPI_HOST);
+    if (!s_hw) {
+        Serial.println("SPI hardware pointer is null");
+        setStatus(STATUS_ERROR);
+        abort();
+    }
 
-  s_inited = true;
-  Serial.println("MCP4922 init (blocking SPI) complete");
+    s_hw->user.usr_mosi = 1;
+    s_hw->user.usr_miso = 0;
+
+    s_inited = true;
+    Serial.println("MCP4922 init (direct SPI hot path) complete");
 }
 
-// Blocking, robust sender: sends each XY pair as two 16-bit words and pulses LDAC with Z
 void MCP4922_DMA_send_XYZ(const uint16_t* xyz_triplets, int count_points)
 {
-  if (!s_inited || !s_dev_xy || count_points <= 0) return;
+    if (!s_inited || !s_hw || count_points <= 0) return;
 
-  for (int i = 0; i < count_points; ++i) {
-    const uint16_t xw = xyz_triplets[3*i + 0];
-    const uint16_t yw = xyz_triplets[3*i + 1];
-    const uint16_t z12 = xyz_triplets[3*i + 2];
+    for (int i = 0; i < count_points; ++i) {
+        const uint16_t xw = xyz_triplets[3 * i + 0];
+        const uint16_t yw = xyz_triplets[3 * i + 1];
+        const uint16_t z12 = xyz_triplets[3 * i + 2];
 
-    // X
-    {
-      spi_transaction_t t = {};
-      t.length = 16;
-      t.flags = SPI_TRANS_USE_TXDATA;
-      pack_be16(t.tx_data, xw);
-      esp_err_t err = spi_device_transmit(s_dev_xy, &t);
-      if (err != ESP_OK) {
-        Serial.printf("SPI transmit X error: %d\n", err);
-        return;
-      }
+        spi_send_16(xw);
+        spi_send_16(yw);
+        latch_with_z((uint8_t)(z12 & 0x3));
     }
-    // Y
-    {
-      spi_transaction_t t = {};
-      t.length = 16;
-      t.flags = SPI_TRANS_USE_TXDATA;
-      pack_be16(t.tx_data, yw);
-      esp_err_t err = spi_device_transmit(s_dev_xy, &t);
-      if (err != ESP_OK) {
-        Serial.printf("SPI transmit Y error: %d\n", err);
-        return;
-      }
-    }
-
-    // Latch XY with Z2-bit code
-    ldac_pulse_fast(z12);
-  }
 }
 
 void MCP4922_DMA_wait(void)
 {
-  // Blocking API completes per call; nothing to drain.
+    if (!s_inited || !s_hw) return;
+    spi_wait_idle();
 }

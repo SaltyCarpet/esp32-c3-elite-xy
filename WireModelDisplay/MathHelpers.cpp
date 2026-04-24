@@ -5,11 +5,15 @@
 #include "ErrorHandler.h"
 #include <random>
 
-// Random helper
+// Random helper - lightweight xorshift RNG (faster on embedded)
 float randFloat(float min, float max) {
-    static std::mt19937 rng{std::random_device{}()};
-    std::uniform_real_distribution<float> dist(min, max);
-    return dist(rng);
+    static uint32_t s = 2463534242u; // deterministic seed
+    // xorshift32
+    s ^= s << 13;
+    s ^= s >> 17;
+    s ^= s << 5;
+    float r = (s & 0xFFFFFFFFu) / 4294967295.0f;
+    return min + r * (max - min);
 }
 
 // -----------------------------
@@ -129,7 +133,7 @@ Vec3 rotateVector(const Quaternion& q, const Vec3& v) {
 
 void integrateOrientation(Quaternion& q, const Vec3& angVel, float dt) {
   float mag = magnitude(&angVel.x);
-  if (mag > 1e-8f) return;
+  if (mag < 1e-8f) return;
   float half = 0.5f * dt * mag;
   float s = fastSin(half) / mag;
   float c = fastCos(half);

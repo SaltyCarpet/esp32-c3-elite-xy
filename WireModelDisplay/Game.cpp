@@ -273,24 +273,24 @@ void updateGame(float dt)
 
 void drawModels()
 {
-    //transformModel(&coordbuffer, shipmover);
-    //wireframeDrawAll(&coordbuffer, 3);
+    if (!beginFrame()) return;
+
     transformModel(&shipbuffer, shipmover);
     wireframeDrawCulled(&shipbuffer, 3);
 
-    for (auto& missile : missilemover)
-    {
+    for (auto& missile : missilemover) {
         transformModel(&missilebuffer, missile);
         wireframeDrawCulled(&missilebuffer, 3);
     }
 
-    for (auto& asteroid : asteroidmover)
-    {
+    for (auto& asteroid : asteroidmover) {
         transformModel(&asteroidbuffer, asteroid);
         wireframeDrawCulled(&asteroidbuffer, 3);
     }
 
     drawText(std::to_string(score), 2048, 2048, 10, 3);
+    
+    presentFrame();
 }
 
 void resetGame()
@@ -300,4 +300,27 @@ void resetGame()
     asteroidmover.clear();
     clearMovBufs(shipmover, kd);
     Serial.println("RESET");
+}
+extern float frameTime;
+
+static void GameTask(void* pvParameters)
+{
+    (void)pvParameters;
+    unsigned long last = millis();
+    while (true) {
+        unsigned long now = millis();
+        if ((now - last) > frameTime) {
+            float dt = (now - last) / 1000.0f;
+            if (dt > 0.1f) dt = 0.1f;
+            last = now;
+            updateGame(dt);
+            drawModels();
+        }
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+}
+
+void startGameTask()
+{
+    xTaskCreatePinnedToCore(GameTask, "Game Task", 8192, NULL, 2, NULL, 0);
 }
